@@ -1,0 +1,63 @@
+# azure-pipelines.yml
+trigger:
+  branches:
+    include:
+      - main
+
+# PR validation
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  mavenOpts: "-Xmx3072m"
+  javaVersion: "17"
+
+stages:
+- stage: Build_Test_Scan
+  displayName: "Build, Test & Sonar Scan"
+  jobs:
+  - job: MavenBuild
+    displayName: "Maven Build + Test + SonarQube"
+    steps:
+    # 1) Prepare SonarQube
+    - task: SonarQubePrepare@5
+      displayName: "Prepare SonarQube"
+      inputs:
+        SonarQube: "SonarQubeServiceConnection"
+        scannerMode: "Other"           # We'll let Maven run normally; this mode just supplies config
+        configMode: "manual"
+        extraProperties: |
+          sonar.projectKey=aks-java-api
+          sonar.projectName=aks-java-api
+          sonar.sourceEncoding=UTF-8
+          sonar.coverage.jacoco.xmlReportPaths=**/jacoco*.xml
+          sonar.java.source=17
+
+    # 2) Build + Test + create coverage
+    - task: Maven@4
+      displayName: "Maven clean verify (tests + JaCoCo)"
+      inputs:
+        mavenPomFile: "pom.xml"
+        goals: "clean verify"
+        options: "-Dmaven.test.failure.ignore=false"
+        publishJUnitResults: true
+        testResultsFiles: "**/surefire-reports/TEST-*.xml"
+        codeCoverageToolOption: JaCoCo
+        javaHomeOption: "JDKVersion"
+        jdkVersionOption: "1.17"
+        mavenOptions: "$(mavenOpts)"
+
+    # 3) Run Sonar analysis (uploads to server)
+    - task: SonarQubeAnalyze@5
+      displayName: "Run SonarQube analysis"
+
+    # 4) Publish Quality Gate to pipeline summary (waits for server processing)
+    - task: SonarQubePublish@5
+      displayName: "Publish Quality Gate"
+      inputs:
+        pollingTimeoutSec: "300"   # wait up to 5 min for analysis to finish server-side
