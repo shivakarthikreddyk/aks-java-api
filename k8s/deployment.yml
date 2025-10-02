@@ -1,10 +1,12 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aks-java-api
 spec:
-  replicas: 1
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: ${REPLICAS}
+  selector:
+    matchLabels:
+      app: aks-java-api
   template:
     metadata:
       labels:
@@ -12,22 +14,24 @@ spec:
     spec:
       containers:
       - name: aks-java-api
-        image: hwacrdev001.azurecr.io/aks-java-api:latest
+        # image injected by the pipeline (or replace ${IMAGE} with replacements)
         ports:
         - containerPort: 8080
+        env:
+        - name: APP_MESSAGE
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: APP_MESSAGE
         readinessProbe:
-          httpGet: { path: /hello, port: 8080 }
+          httpGet:
+            path: /hello
+            port: 8080
           initialDelaySeconds: 5
           periodSeconds: 5
-          failureThreshold: 6
         livenessProbe:
-          httpGet: { path: /hello, port: 8080 }
+          httpGet:
+            path: /hello
+            port: 8080
           initialDelaySeconds: 15
           periodSeconds: 10
-        resources:
-          requests:
-            cpu: "100m"
-            memory: "128Mi"
-          limits:
-            cpu: "500m"
-            memory: "512Mi"

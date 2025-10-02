@@ -1,6 +1,5 @@
 target/
-.git/
-.github/
+.git
 .gitignore
-Dockerfile
 README.md
+azure-pipelines.yml

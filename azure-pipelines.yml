@@ -1,5 +1,3 @@
-# Azure Pipelines YAML for Java + Maven + SonarQube + Docker + AKS
-
 trigger:
   branches: { include: [ main ] }
 
@@ -13,28 +11,25 @@ variables:
   javaVersion: '17'
   mavenOpts: '-Xmx3072m'
   imageRepository: 'aks-java-api'
-  acrLoginServer: 'hwacrdev001.azurecr.io'      # <myacr>.azurecr.io
+  acrLoginServer: 'hwacrdev001.azurecr.io'   # <myacr>.azurecr.io
   tag: '$(Build.BuildId)'
   kubernetesServiceConnection: 'AKSServiceConnection'
   acrServiceConnection: 'ACRServiceConnection'
   k8sNamespace: 'demo'
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 1) Build + Test + Sonar
-# ────────────────────────────────────────────────────────────────────────────────
 stages:
+# 1) Build + Test + Sonar
 - stage: Build_Test_Scan
   displayName: 'Build, Test & Sonar Scan'
   jobs:
   - job: MavenBuild
-    displayName: 'Maven Build + Test + SonarQube'
     steps:
     - checkout: self
 
     - task: SonarQubePrepare@5
       displayName: 'Prepare SonarQube Analysis'
       inputs:
-        SonarQube: 'SonarQube Server local connection'   # must match your service connection
+        SonarQube: 'SonarQube Server local connection'
         scannerMode: 'Other'
         configMode: 'manual'
         extraProperties: |
@@ -65,9 +60,7 @@ stages:
       inputs:
         pollingTimeoutSec: '300'
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 2) Build & Push Docker image to ACR
-# ────────────────────────────────────────────────────────────────────────────────
+# 2) Build & Push image
 - stage: Build_Push_Image
   displayName: 'Build & Push Docker Image'
   dependsOn: Build_Test_Scan
@@ -76,6 +69,7 @@ stages:
   - job: DockerBuild
     steps:
     - checkout: self
+
     - task: Docker@2
       displayName: 'Login to ACR'
       inputs:
@@ -90,7 +84,7 @@ stages:
         dockerfile: '**/Dockerfile'
         tags: |
           $(tag)
-      # Use the ACR login server as default context for tagging
+
     - task: Docker@2
       displayName: 'Push image to ACR'
       inputs:
@@ -100,9 +94,7 @@ stages:
           $(tag)
         containerRegistry: '$(acrServiceConnection)'
 
-# ────────────────────────────────────────────────────────────────────────────────
-# 3) Deploy to AKS with rollout check
-# ────────────────────────────────────────────────────────────────────────────────
+# 3) Deploy to AKS (+ rollout wait)
 - stage: Deploy_AKS
   displayName: 'Deploy to AKS (demo)'
   dependsOn: Build_Push_Image
@@ -110,22 +102,39 @@ stages:
   jobs:
   - deployment: Deploy
     displayName: 'K8s rollout'
-    environment: 'aks-dev'            # use an Environment with approvals if desired
+    environment: 'aks-dev'   # add approvals on this env if you want
     strategy:
       runOnce:
         deploy:
           steps:
           - checkout: self
 
-          # (Optional) ensure namespace exists
-          - task: KubernetesManifest@1
-            displayName: 'Create namespace if missing'
+          # Ensure namespace exists (idempotent)
+          - task: Kubernetes@1
+            displayName: 'Ensure namespace exists'
             inputs:
-              action: 'createSecret'   # No-op trick not ideal; prefer a separate kubectl apply for namespace
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+              command: 'apply'
+              useConfigurationFile: true
+              configurationType: 'inline'
+              inline: |
+                apiVersion: v1
+                kind: Namespace
+                metadata:
+                  name: $(k8sNamespace)
+
+          # Create/refresh a runtime secret (optional)
+          - task: KubernetesManifest@1
+            displayName: 'Create/Update app secret'
+            inputs:
+              action: createSecret
               kubernetesServiceConnection: '$(kubernetesServiceConnection)'
               namespace: '$(k8sNamespace)'
-              secretType: 'dockerRegistry'   # ignored by namespace; keep if you actually create a secret elsewhere
-            continueOnError: true
+              secretType: generic
+              secretName: 'app-secrets'
+              secretArguments: |
+                --from-literal=APP_MESSAGE=$(APP_MESSAGE)
 
           - task: KubernetesManifest@1
             displayName: 'Deploy app + service'
@@ -138,8 +147,11 @@ stages:
                 k8s/service.yaml
               containers: |
                 $(acrLoginServer)/$(imageRepository):$(tag)
+              replacements: |
+                k8s/deployment.yaml:${REPLICAS}=1
+                # If you keep ${IMAGE} in deployment.yaml, enable the next line and remove `containers:` above:
+                # k8s/deployment.yaml:${IMAGE}=$(acrLoginServer)/$(imageRepository):$(tag)
 
-          # ⬇️ Option A: Wait for the rollout to be Ready
           - task: Kubernetes@1
             displayName: 'Rollout status (wait until Ready)'
             inputs:
