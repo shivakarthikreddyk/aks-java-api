@@ -1,0 +1,62 @@
+# PR Validation Pipeline (fast)
+name: PR-$(Date:yyyyMMdd)$(Rev:.r)
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/**
+      - pom.xml
+      - .ado/**
+      - azure-pipelines.yml
+
+trigger: none   # no CI on push; PR-only
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  javaVersion: '17'
+  mavenOpts: '-Xmx2048m'
+
+stages:
+- stage: PR_Validation
+  displayName: "PR Validation: Build + Test + Sonar"
+  jobs:
+  - job: BuildTestScan
+    displayName: "Build + Unit Tests + Sonar"
+    steps:
+    - task: SonarQubePrepare@5
+      displayName: "Prepare Sonar"
+      inputs:
+        SonarQube: "SonarQube Server local connection"
+        scannerMode: "Other"
+        configMode: "manual"
+        extraProperties: |
+          sonar.projectKey=aks-java-api
+          sonar.projectName=aks-java-api
+          sonar.java.source=17
+          sonar.coverage.jacoco.xmlReportPaths=**/jacoco*.xml
+
+    - task: Maven@4
+      displayName: "Maven clean verify"
+      inputs:
+        mavenPomFile: "pom.xml"
+        goals: "clean verify"
+        options: "-Dmaven.test.failure.ignore=false"
+        publishJUnitResults: true
+        testResultsFiles: "**/surefire-reports/TEST-*.xml"
+        codeCoverageToolOption: JaCoCo
+        javaHomeOption: "JDKVersion"
+        jdkVersionOption: "1.17"
+        mavenOptions: "$(mavenOpts)"
+
+    - task: SonarQubeAnalyze@5
+      displayName: "Run SonarQube Analysis"
+
+    - task: SonarQubePublish@5
+      displayName: "Publish Quality Gate"
+      inputs:
+        pollingTimeoutSec: "300"

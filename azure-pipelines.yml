@@ -1,38 +1,42 @@
-# Azure Pipelines YAML for Java + Maven + SonarQube
+# Azure Pipelines YAML for Java + Maven + SonarQube + Docker + AKS
 
 trigger:
-  branches:
-    include:
-      - main
+  branches: { include: [ main ] }
 
-# Run CI on pull requests targeting main
 pr:
-  branches:
-    include:
-      - main
+  branches: { include: [ main ] }
 
 pool:
   vmImage: ubuntu-latest
 
 variables:
-  mavenOpts: "-Xmx3072m"
-  javaVersion: "17"
+  javaVersion: '17'
+  mavenOpts: '-Xmx3072m'
+  imageRepository: 'aks-java-api'
+  acrLoginServer: 'hwacrdev001.azurecr.io'      # <myacr>.azurecr.io
+  tag: '$(Build.BuildId)'
+  kubernetesServiceConnection: 'AKSServiceConnection'
+  acrServiceConnection: 'ACRServiceConnection'
+  k8sNamespace: 'demo'
 
+# ────────────────────────────────────────────────────────────────────────────────
+# 1) Build + Test + Sonar
+# ────────────────────────────────────────────────────────────────────────────────
 stages:
 - stage: Build_Test_Scan
-  displayName: "Build, Test & Sonar Scan"
+  displayName: 'Build, Test & Sonar Scan'
   jobs:
   - job: MavenBuild
-    displayName: "Maven Build + Test + SonarQube"
+    displayName: 'Maven Build + Test + SonarQube'
     steps:
+    - checkout: self
 
-    # 1) Prepare SonarQube
     - task: SonarQubePrepare@5
-      displayName: "Prepare SonarQube Analysis"
+      displayName: 'Prepare SonarQube Analysis'
       inputs:
-        SonarQube: "SonarQube Server local connection"   # 👈 must match your service connection name exactly
-        scannerMode: "Other"
-        configMode: "manual"
+        SonarQube: 'SonarQube Server local connection'   # must match your service connection
+        scannerMode: 'Other'
+        configMode: 'manual'
         extraProperties: |
           sonar.projectKey=aks-java-api
           sonar.projectName=aks-java-api
@@ -40,26 +44,116 @@ stages:
           sonar.java.source=17
           sonar.coverage.jacoco.xmlReportPaths=**/jacoco*.xml
 
-    # 2) Build + Test (creates JaCoCo report if plugin added in pom.xml)
     - task: Maven@4
-      displayName: "Maven clean verify (tests + JaCoCo)"
+      displayName: 'Maven clean verify (tests + JaCoCo)'
       inputs:
-        mavenPomFile: "pom.xml"
-        goals: "clean verify"
-        options: "-Dmaven.test.failure.ignore=false"
+        mavenPomFile: 'pom.xml'
+        goals: 'clean verify'
+        options: '-Dmaven.test.failure.ignore=false'
         publishJUnitResults: true
-        testResultsFiles: "**/surefire-reports/TEST-*.xml"
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
         codeCoverageToolOption: JaCoCo
-        javaHomeOption: "JDKVersion"
-        jdkVersionOption: "1.17"
-        mavenOptions: "$(mavenOpts)"
+        javaHomeOption: 'JDKVersion'
+        jdkVersionOption: '1.17'
+        mavenOptions: '$(mavenOpts)'
 
-    # 3) Run SonarQube Analysis
     - task: SonarQubeAnalyze@5
-      displayName: "Run SonarQube Analysis"
+      displayName: 'Run SonarQube Analysis'
 
-    # 4) Publish Quality Gate
     - task: SonarQubePublish@5
-      displayName: "Publish Quality Gate Result"
+      displayName: 'Publish Quality Gate Result'
       inputs:
-        pollingTimeoutSec: "300"
+        pollingTimeoutSec: '300'
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 2) Build & Push Docker image to ACR
+# ────────────────────────────────────────────────────────────────────────────────
+- stage: Build_Push_Image
+  displayName: 'Build & Push Docker Image'
+  dependsOn: Build_Test_Scan
+  condition: succeeded()
+  jobs:
+  - job: DockerBuild
+    steps:
+    - checkout: self
+    - task: Docker@2
+      displayName: 'Login to ACR'
+      inputs:
+        command: login
+        containerRegistry: '$(acrServiceConnection)'
+
+    - task: Docker@2
+      displayName: 'Build image'
+      inputs:
+        command: build
+        repository: '$(imageRepository)'
+        dockerfile: '**/Dockerfile'
+        tags: |
+          $(tag)
+      # Use the ACR login server as default context for tagging
+    - task: Docker@2
+      displayName: 'Push image to ACR'
+      inputs:
+        command: push
+        repository: '$(imageRepository)'
+        tags: |
+          $(tag)
+        containerRegistry: '$(acrServiceConnection)'
+
+# ────────────────────────────────────────────────────────────────────────────────
+# 3) Deploy to AKS with rollout check
+# ────────────────────────────────────────────────────────────────────────────────
+- stage: Deploy_AKS
+  displayName: 'Deploy to AKS (demo)'
+  dependsOn: Build_Push_Image
+  condition: succeeded()
+  jobs:
+  - deployment: Deploy
+    displayName: 'K8s rollout'
+    environment: 'aks-dev'            # use an Environment with approvals if desired
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: self
+
+          # (Optional) ensure namespace exists
+          - task: KubernetesManifest@1
+            displayName: 'Create namespace if missing'
+            inputs:
+              action: 'createSecret'   # No-op trick not ideal; prefer a separate kubectl apply for namespace
+              kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+              namespace: '$(k8sNamespace)'
+              secretType: 'dockerRegistry'   # ignored by namespace; keep if you actually create a secret elsewhere
+            continueOnError: true
+
+          - task: KubernetesManifest@1
+            displayName: 'Deploy app + service'
+            inputs:
+              action: deploy
+              kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+              namespace: '$(k8sNamespace)'
+              manifests: |
+                k8s/deployment.yaml
+                k8s/service.yaml
+              containers: |
+                $(acrLoginServer)/$(imageRepository):$(tag)
+
+          # ⬇️ Option A: Wait for the rollout to be Ready
+          - task: Kubernetes@1
+            displayName: 'Rollout status (wait until Ready)'
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+              namespace: '$(k8sNamespace)'
+              command: 'rollout'
+              arguments: 'status deploy/aks-java-api --timeout=300s'
+
+          - task: Kubernetes@1
+            displayName: 'Show service (external IP)'
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+              namespace: '$(k8sNamespace)'
+              command: 'get'
+              arguments: 'svc aks-java-api -o wide'
