@@ -1,10 +1,11 @@
-# azure-pipelines.yml
+# Azure Pipelines YAML for Java + Maven + SonarQube
+
 trigger:
   branches:
     include:
       - main
 
-# PR validation
+# Run CI on pull requests targeting main
 pr:
   branches:
     include:
@@ -24,21 +25,22 @@ stages:
   - job: MavenBuild
     displayName: "Maven Build + Test + SonarQube"
     steps:
+
     # 1) Prepare SonarQube
     - task: SonarQubePrepare@5
-      displayName: "Prepare SonarQube"
+      displayName: "Prepare SonarQube Analysis"
       inputs:
-        SonarQube: "SonarQubeServiceConnection"
-        scannerMode: "Other"           # We'll let Maven run normally; this mode just supplies config
+        SonarQube: "SonarQube Server local connection"   # 👈 must match your service connection name exactly
+        scannerMode: "Other"
         configMode: "manual"
         extraProperties: |
           sonar.projectKey=aks-java-api
           sonar.projectName=aks-java-api
           sonar.sourceEncoding=UTF-8
-          sonar.coverage.jacoco.xmlReportPaths=**/jacoco*.xml
           sonar.java.source=17
+          sonar.coverage.jacoco.xmlReportPaths=**/jacoco*.xml
 
-    # 2) Build + Test + create coverage
+    # 2) Build + Test (creates JaCoCo report if plugin added in pom.xml)
     - task: Maven@4
       displayName: "Maven clean verify (tests + JaCoCo)"
       inputs:
@@ -52,12 +54,12 @@ stages:
         jdkVersionOption: "1.17"
         mavenOptions: "$(mavenOpts)"
 
-    # 3) Run Sonar analysis (uploads to server)
+    # 3) Run SonarQube Analysis
     - task: SonarQubeAnalyze@5
-      displayName: "Run SonarQube analysis"
+      displayName: "Run SonarQube Analysis"
 
-    # 4) Publish Quality Gate to pipeline summary (waits for server processing)
+    # 4) Publish Quality Gate
     - task: SonarQubePublish@5
-      displayName: "Publish Quality Gate"
+      displayName: "Publish Quality Gate Result"
       inputs:
-        pollingTimeoutSec: "300"   # wait up to 5 min for analysis to finish server-side
+        pollingTimeoutSec: "300"
