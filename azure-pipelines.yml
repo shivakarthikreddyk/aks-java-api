@@ -1,56 +1,68 @@
-# ============================================
-# CI/CD: Maven + Docker (ACR) + AKS rollout
-# Pool: Default (self-hosted agent)
-# ============================================
+# Azure Pipelines – self-hosted agent (Default pool) + JDK 17 installed in-pipeline
 
 trigger:
-  branches: { include: [ main ] }
+  branches:
+    include: [ main ]
 
 pr:
-  branches: { include: [ main ] }
+  branches:
+    include: [ main ]
 
-# Your self-hosted agent pool
+# Use your self-hosted pool/agent
 pool:
-  name: Default
+  name: Default   # (SHIVA is in this pool)
 
-# ---- Variables you should keep/update ----
 variables:
-  # ACR + image
+  # Image/registry/cluster
   imageRepository: 'aks-java-api'
-  acrLoginServer: 'hwacrdev001.azurecr.io'          # e.g. myacr.azurecr.io
-  acrServiceConnection: 'ACRServiceConnection'      # Service connection (Docker Registry / ACR)
+  acrLoginServer: 'hwacrdev001.azurecr.io'      # <your-acr>.azurecr.io
+  acrServiceConnection: 'ACRServiceConnection'  # Docker Registry service connection to ACR
+  kubernetesServiceConnection: 'AKSServiceConnection'
+  k8sNamespace: 'demo'
   tag: '$(Build.BuildId)'
 
-  # AKS
-  kubernetesServiceConnection: 'AKSServiceConnection' # Service connection (Kubernetes)
-  k8sNamespace: 'demo'
+  # Sonar (keep as you used)
+  sonarConnection: 'SonarQube Server local connection'
 
-# ============================================
-# 1) Build + Test + Sonar
-# ============================================
 stages:
+# ─────────────────────────────────────────────────────────────────────────────
+# 1) Build + Test + Sonar (JDK 17 installed via pipeline on self-hosted agent)
+# ─────────────────────────────────────────────────────────────────────────────
 - stage: Build_Test_Scan
-  displayName: 'Build, Test & Sonar'
+  displayName: 'Build, Test & Sonar Scan'
   jobs:
   - job: MavenBuild
     displayName: 'Maven build & tests'
     steps:
     - checkout: self
 
-    # Ensure Java 17 is available on a self-hosted agent
-    # (downloads a JDK into the agent tool cache)
-    - task: JavaToolInstaller@0
-      displayName: 'Install JDK 17'
+    # Install Temurin JDK 17 on Windows self-hosted agent (requires Chocolatey)
+    - task: PowerShell@2
+      displayName: 'Install JDK 17 (Temurin) & set JAVA_HOME/PATH'
       inputs:
-        versionSpec: '17'
-        jdkArchitectureOption: 'x64'
-        jdkSourceOption: 'Azure Pipelines'
+        targetType: 'inline'
+        script: |
+          choco install -y temurin17
+          $jdk = Get-ChildItem 'C:\Program Files\Eclipse Adoptium\' -Directory `
+                  | Where-Object { $_.Name -like 'jdk-17*' } `
+                  | Sort-Object LastWriteTime -Descending `
+                  | Select-Object -First 1
+          if (-not $jdk) {
+            Write-Error "JDK 17 not found after install."
+            exit 1
+          }
+          Write-Host "Found JDK: $($jdk.FullName)"
+          # Make it available to following tasks in this job
+          Write-Host "##vso[task.setvariable variable=JAVA_HOME]$($jdk.FullName)"
+          Write-Host "##vso[task.setvariable variable=JAVA_HOME_17_X64]$($jdk.FullName)"
+          Write-Host "##vso[task.prependpath]$($jdk.FullName)\bin"
+          java -version
 
-    # (Optional) SonarQube — requires a working service connection
+    # Sonar – prepare
     - task: SonarQubePrepare@5
-      displayName: 'Prepare SonarQube'
+      displayName: 'Prepare SonarQube Analysis'
       inputs:
-        SonarQube: 'SonarQube Server local connection'
+        SonarQube: '$(sonarConnection)'
         scannerMode: 'Other'
         configMode: 'manual'
         extraProperties: |
@@ -60,18 +72,19 @@ stages:
           sonar.java.source=17
           sonar.coverage.jacoco.xmlReportPaths=**/jacoco*.xml
 
+    # Build & test (Maven uses the JDK on PATH we just installed)
     - task: Maven@4
       displayName: 'Maven clean verify (tests + JaCoCo)'
       inputs:
         mavenPomFile: 'pom.xml'
         goals: 'clean verify'
+        options: '-Dmaven.test.failure.ignore=false'
         publishJUnitResults: true
         testResultsFiles: '**/surefire-reports/TEST-*.xml'
         codeCoverageToolOption: 'JaCoCo'
-        javaHomeOption: 'JDKVersion'
-        jdkVersionOption: '1.17'
-        mavenOptions: '-Xmx3072m -Dmaven.test.failure.ignore=false'
+        javaHomeOption: 'Path'    # IMPORTANT: use the JAVA on PATH we set above
 
+    # Sonar – analyze & publish gate
     - task: SonarQubeAnalyze@5
       displayName: 'Run SonarQube Analysis'
 
@@ -80,27 +93,27 @@ stages:
       inputs:
         pollingTimeoutSec: '300'
 
-# ============================================
+# ─────────────────────────────────────────────────────────────────────────────
 # 2) Build & Push Docker image to ACR
-# ============================================
+# ─────────────────────────────────────────────────────────────────────────────
 - stage: Build_Push_Image
-  displayName: 'Build & Push image'
+  displayName: 'Build & Push Docker Image'
   dependsOn: Build_Test_Scan
   condition: succeeded()
   jobs:
-  - job: DockerBuild
+  - job: ACRBuild
     displayName: 'Docker build & push'
     steps:
     - checkout: self
 
     # Login to ACR via service connection
     - task: Docker@2
-      displayName: 'ACR login'
+      displayName: 'Login to ACR'
       inputs:
         command: 'login'
         containerRegistry: '$(acrServiceConnection)'
 
-    # Build the image
+    # Build the image locally (agent must have Docker Desktop running & agent running elevated)
     - task: Docker@2
       displayName: 'Build image'
       inputs:
@@ -110,34 +123,34 @@ stages:
         tags: |
           $(tag)
 
-    # Push to ACR
+    # Push the image to ACR
     - task: Docker@2
-      displayName: 'Push image'
+      displayName: 'Push image to ACR'
       inputs:
         command: 'push'
-        containerRegistry: '$(acrServiceConnection)'
         repository: '$(imageRepository)'
+        containerRegistry: '$(acrServiceConnection)'
         tags: |
           $(tag)
 
-# ============================================
-# 3) Deploy to AKS and wait for rollout
-# ============================================
+# ─────────────────────────────────────────────────────────────────────────────
+# 3) Deploy to AKS (wait for rollout)
+# ─────────────────────────────────────────────────────────────────────────────
 - stage: Deploy_AKS
   displayName: 'Deploy to AKS (demo)'
   dependsOn: Build_Push_Image
   condition: succeeded()
   jobs:
-  - deployment: Deploy
+  - deployment: K8sDeploy
     displayName: 'K8s deploy'
-    environment: 'aks-dev'     # Optional: add approvals on this environment
+    environment: 'aks-dev'
     strategy:
       runOnce:
         deploy:
           steps:
           - checkout: self
 
-          # Ensure the namespace exists (idempotent)
+          # Idempotent namespace creation
           - task: Kubernetes@1
             displayName: 'Ensure namespace exists'
             inputs:
@@ -152,7 +165,7 @@ stages:
                 metadata:
                   name: $(k8sNamespace)
 
-          # Optional secret (if your app reads APP_MESSAGE from secretKeyRef)
+          # Optional: create/update secret
           - task: KubernetesManifest@1
             displayName: 'Create/Update app secret'
             inputs:
@@ -164,7 +177,7 @@ stages:
               secretArguments: |
                 --from-literal=APP_MESSAGE=$(APP_MESSAGE)
 
-          # Deploy manifests and substitute the container image tag
+          # Deploy deployment + service; inject image tag
           - task: KubernetesManifest@1
             displayName: 'Deploy app + service'
             inputs:
@@ -179,7 +192,7 @@ stages:
 
           # Wait for rollout to finish
           - task: Kubernetes@1
-            displayName: 'Rollout status'
+            displayName: 'Rollout status (wait until Ready)'
             inputs:
               connectionType: 'Kubernetes Service Connection'
               kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
@@ -187,9 +200,9 @@ stages:
               command: 'rollout'
               arguments: 'status deploy/aks-java-api --timeout=300s'
 
-          # Show service external IP (if LoadBalancer)
+          # Print Service info (External IP if LoadBalancer)
           - task: Kubernetes@1
-            displayName: 'Show service'
+            displayName: 'Show service (external IP)'
             inputs:
               connectionType: 'Kubernetes Service Connection'
               kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
