@@ -5,7 +5,7 @@ pr:
   branches: { include: [ main ] }
 
 pool:
-  vmImage: ubuntu-latest
+  name: Default   # (this is the pool where SHIVA is registered)
 
 variables:
   javaVersion: '17'
