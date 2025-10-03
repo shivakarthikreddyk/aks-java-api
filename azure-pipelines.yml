@@ -5,7 +5,7 @@ pr:
   branches: { include: [ main ] }
 
 pool:
-  name: Default
+  vmImage: ubuntu-latest
 
 variables:
   javaVersion: '17'
