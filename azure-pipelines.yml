@@ -23,7 +23,8 @@ variables:
 
   # ----- service connections -----
   azureSubscription: 'AzureRM-ACR'                      # ARM service connection (screenshots show it exists)
-  kubernetesServiceConnection: 'AKSServiceConnection'   # K8s service connection to aks-hw-dev
+  #kubernetesServiceConnection: 'AKSServiceConnection'   # K8s service connection to aks-hw-dev
+  kubernetesServiceConnection: 'AKSServiceConnectionAdmin'
 
   # ----- k8s -----
   k8sNamespace: 'demo'
