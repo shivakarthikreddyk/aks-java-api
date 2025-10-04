@@ -1,7 +1,7 @@
-# =========================================
-# Java → ACR (server-side build) → AKS
-# Self-hosted Windows agent (pool: Default)
-# =========================================
+# ================================
+# Azure Pipelines: Java + ACR + AKS (self-hosted Windows agent)
+# Pool: Default  |  Agent: SHIVA
+# ================================
 
 trigger:
   branches:
@@ -12,48 +12,48 @@ pr:
     include: [ main ]
 
 pool:
-  name: Default
+  name: Default   # your self-hosted pool
 
 variables:
-  # ---- image & registry ----
+  # ----- Image & registry -----
   imageRepository: 'aks-java-api'
-  acrName: 'hwacrdev001'                         # ACR resource name (no FQDN)
-  acrLoginServer: 'hwacrdev001.azurecr.io'
+  acrName: 'hwacrdev001'                      # ACR resource name (no FQDN)
+  acrLoginServer: 'hwacrdev001.azurecr.io'    # ACR login server
   tag: '$(Build.BuildId)'
 
-  # ---- service connections ----
-  azureSubscription: 'AzureRM-ACR'               # ARM service connection (to ACR/AKS)
-  kubernetesServiceConnection: 'AKSServiceConnection'  # non-admin K8s SC is fine here
+  # ----- Service connections -----
+  azureSubscription: 'AzureRM-ACR'            # ARM service connection
+  kubernetesServiceConnection: 'AKSServiceConnectionAdmin'  # cluster-admin K8s SC
 
-  # ---- k8s ----
+  # ----- K8s -----
   k8sNamespace: 'demo'
 
-  # ---- sonar (optional) ----
+  # ----- Sonar (optional) -----
   sonarServiceConnection: 'SonarQube Server local connection'
 
 stages:
-# ==============================
-# 1) Build, Test, (optional) Sonar
-# ==============================
+# ================================
+# 1) Build, Test, Sonar
+# ================================
 - stage: Build_Test_Scan
-  displayName: 'Build, Test & Sonar (optional)'
+  displayName: 'Build, Test & Sonar'
   jobs:
   - job: MavenBuild
     displayName: 'Maven build & tests'
     steps:
       - checkout: self
 
-      # JDK 17 for Windows agents
+      # JDK 17 on self-hosted Windows
       - task: JavaToolInstaller@0
         displayName: 'Install JDK 17 (Temurin)'
         inputs:
           versionSpec: '17'
           jdkArchitectureOption: 'x64'
-          jdkSourceOption: 'PreInstalled'          # downloads if not cached
+          jdkSourceOption: 'PreInstalled'   # downloads/caches via toolcache if needed
           jdkDestinationDirectory: '$(Agent.ToolsDirectory)/Java'
           cleanDestinationDirectory: false
 
-      # ---- SonarQube: keep if you want analysis; else remove these 2 tasks ----
+      # Sonar prepare (optional; extension shows deprecation warnings but still works)
       - task: SonarQubePrepare@5
         displayName: 'Prepare SonarQube Analysis'
         inputs:
@@ -75,8 +75,8 @@ stages:
           options: '-Dmaven.test.failure.ignore=false'
           publishJUnitResults: true
           testResultsFiles: '**/surefire-reports/TEST-*.xml'
-          codeCoverageToolOption: 'JaCoCo'
-          javaHomeOption: 'Path'
+          codeCoverageToolOption: JaCoCo
+          javaHomeOption: 'Path'        # use JAVA_HOME set by JavaToolInstaller
           jdkDirectory: '$(JAVA_HOME)'
           mavenOptions: '-Xmx1024m'
 
@@ -90,9 +90,9 @@ stages:
           pollingTimeoutSec: '300'
         condition: succeededOrFailed()
 
-# ==============================
-# 2) Build container image inside ACR
-# ==============================
+# ================================
+# 2) ACR server-side build (no Docker/WSL on agent)
+# ================================
 - stage: ACR_Build
   displayName: 'Build image in ACR (az acr build)'
   dependsOn: Build_Test_Scan
@@ -103,29 +103,29 @@ stages:
     steps:
       - checkout: self
 
-      # Use PowerShell to avoid WSL/bash on Windows agent
+      # Use PowerShell (avoid Bash/WSL on Windows agent)
       - task: AzureCLI@2
         displayName: 'az acr build → $(imageRepository):$(tag)'
         inputs:
           azureSubscription: '$(azureSubscription)'
-          scriptType: ps
-          scriptLocation: inlineScript
-          failOnStandardError: true
+          scriptType: 'ps'                 # ✅ Force PowerShell
+          scriptLocation: 'inlineScript'
           inlineScript: |
             Write-Host "Using subscription:"
             az account show
+
             Write-Host "Starting ACR build for $(imageRepository):$(tag)..."
             az acr build `
               --registry $(acrName) `
               --image $(imageRepository):$(tag) `
               --file Dockerfile `
               .
+
             Write-Host "✅ ACR build completed."
 
-# ==============================
-# 3) Deploy to AKS
-#    (Create namespace with admin kubeconfig, then deploy with SC)
-# ==============================
+# ================================
+# 3) Deploy to AKS + rollout wait
+# ================================
 - stage: Deploy_AKS
   displayName: 'Deploy to AKS (demo)'
   dependsOn: ACR_Build
@@ -133,43 +133,45 @@ stages:
   jobs:
   - deployment: Deploy
     displayName: 'K8s deploy & rollout'
-    environment: 'aks-dev'
+    environment: 'aks-dev'   # optional approvals
     strategy:
       runOnce:
         deploy:
           steps:
             - checkout: self
 
-            # Create/ensure namespace with admin kubeconfig (bypasses SC RBAC limits)
-            - task: AzureCLI@2
-              displayName: 'Ensure namespace (admin kubeconfig)'
+            # If you used a non-admin K8s service connection, remove this step and precreate the namespace out-of-band
+            - task: Kubernetes@1
+              displayName: 'Ensure namespace $(k8sNamespace)'
               inputs:
-                azureSubscription: '$(azureSubscription)'
-                scriptType: ps
-                scriptLocation: inlineScript
-                failOnStandardError: true
-                inlineScript: |
-                  # Pull admin kubeconfig & create namespace idempotently
-                  az aks get-credentials -g rg-hw-aks-dev -n aks-hw-dev --admin --overwrite-existing
-                  kubectl create namespace $(k8sNamespace) --dry-run=client -o yaml | kubectl apply -f -
+                connectionType: 'Kubernetes Service Connection'
+                kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+                command: 'apply'
+                useConfigurationFile: true
+                configurationType: 'inline'
+                inline: |
+                  apiVersion: v1
+                  kind: Namespace
+                  metadata:
+                    name: $(k8sNamespace)
 
-            # Optional: create/update a secret the app uses
+            # Optional: app secret (requires permission in the target namespace)
             - task: KubernetesManifest@1
               displayName: 'Create/Update app secret'
               inputs:
-                action: createSecret
+                action: 'createSecret'
                 kubernetesServiceConnection: '$(kubernetesServiceConnection)'
                 namespace: '$(k8sNamespace)'
-                secretType: generic
+                secretType: 'generic'
                 secretName: 'app-secrets'
                 secretArguments: |
                   --from-literal=APP_MESSAGE=$(APP_MESSAGE)
 
-            # Deploy manifests with the freshly built image
+            # Deploy manifests and set the image/tag
             - task: KubernetesManifest@1
               displayName: 'Deploy app + service'
               inputs:
-                action: deploy
+                action: 'deploy'
                 kubernetesServiceConnection: '$(kubernetesServiceConnection)'
                 namespace: '$(k8sNamespace)'
                 manifests: |
@@ -188,7 +190,7 @@ stages:
                 command: 'rollout'
                 arguments: 'status deploy/aks-java-api --timeout=300s'
 
-            # Show service external IP (if Service type: LoadBalancer)
+            # Show service external IP
             - task: Kubernetes@1
               displayName: 'Show service (external IP)'
               inputs:
