@@ -7,10 +7,10 @@ pr:
   branches: { include: [ main ] }
 
 pool:
-  name: Default       # your self-hosted agent pool (SHIVA)
+  name: Default   # your self-hosted agent pool (agent SHIVA)
 
 variables:
-  # App/Image
+  # Image / app
   imageRepository: 'aks-java-api'
   tag: '$(Build.BuildId)'
 
@@ -19,13 +19,13 @@ variables:
   acrLoginServer: 'hwacrdev001.azurecr.io'
   kubeNamespace: 'demo'
 
-  # Optional app setting for secret demo (delete if unused)
+  # Optional demo secret
   APP_MESSAGE: 'Hello from pipeline'
 
-# ───────────────────────────────────────────────────────────────────────────────
-# 1) Build, Test & (optional) Sonar
-# ───────────────────────────────────────────────────────────────────────────────
 stages:
+# ───────────────────────────────
+# 1) Build, Test & (optional) Sonar
+# ───────────────────────────────
 - stage: Build_Test_Scan
   displayName: 'Build, Test & (optional) Sonar'
   jobs:
@@ -34,7 +34,6 @@ stages:
     steps:
       - checkout: self
 
-      # JDK 17 for Maven (uses preinstalled JDK on the agent if present)
       - task: JavaToolInstaller@0
         displayName: 'Install JDK 17'
         inputs:
@@ -42,7 +41,7 @@ stages:
           jdkArchitectureOption: 'x64'
           jdkSourceOption: 'PreInstalled'
 
-      # (Optional) SonarQube — remove these 3 tasks if you’re not using Sonar
+      # (Optional) Sonar — remove the three Sonar tasks if you’re not using it
       - task: SonarQubePrepare@5
         displayName: 'Prepare SonarQube Analysis'
         inputs:
@@ -75,37 +74,39 @@ stages:
         inputs:
           pollingTimeoutSec: '300'
 
-# ───────────────────────────────────────────────────────────────────────────────
-# 2) Build image in ACR (server-side; Docker not needed on agent)
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────
+# 2) Build image in ACR (server-side)
+#    ⚠️ Runs with PowerShell, NOT bash
+# ───────────────────────────────
 - stage: ACR_Build
   displayName: 'Build image in ACR (az acr build)'
   dependsOn: Build_Test_Scan
   condition: succeeded()
   jobs:
   - job: ACRBuild
-    displayName: 'ACR build: $(imageRepository):$(tag)'
+    displayName: 'az acr build → $(imageRepository):$(tag)'
     steps:
       - checkout: self
 
       - task: AzureCLI@2
         displayName: 'az acr build → $(imageRepository):$(tag)'
         inputs:
-          azureSubscription: 'AzureRM-ACR'     # ARM service connection name
-          scriptType: 'bash'
+          azureSubscription: 'AzureRM-ACR'     # ARM service connection
+          scriptType: 'ps'                     # ✅ PowerShell, avoids WSL
           scriptLocation: 'inlineScript'
+          workingDirectory: '$(Build.SourcesDirectory)'
           inlineScript: |
-            set -euo pipefail
-            echo "Building image in ACR: $(acrName)/$(imageRepository):$(tag)"
-            az acr build \
-              --registry $(acrName) \
-              --image $(imageRepository):$(tag) \
+            Write-Host "Logging into subscription and building image in ACR..."
+            az acr build `
+              --registry $(acrName) `
+              --image $(imageRepository):$(tag) `
+              --file Dockerfile `
               .
-            echo "Done."
+            Write-Host "ACR build completed."
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────
 # 3) Deploy to AKS + wait for rollout
-# ───────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────
 - stage: Deploy_AKS
   displayName: 'Deploy to AKS (demo)'
   dependsOn: ACR_Build
@@ -120,7 +121,6 @@ stages:
           steps:
             - checkout: self
 
-            # Ensure namespace exists (idempotent)
             - task: Kubernetes@1
               displayName: 'Ensure namespace $(kubeNamespace)'
               inputs:
@@ -135,7 +135,6 @@ stages:
                   metadata:
                     name: $(kubeNamespace)
 
-            # Optional: create/update a simple app secret
             - task: KubernetesManifest@1
               displayName: 'Create/Update app secret'
               inputs:
@@ -147,7 +146,6 @@ stages:
                 secretArguments: |
                   --from-literal=APP_MESSAGE=$(APP_MESSAGE)
 
-            # Deploy manifests; let the task inject the built image
             - task: KubernetesManifest@1
               displayName: 'Deploy app + service'
               inputs:
@@ -160,9 +158,8 @@ stages:
                 containers: |
                   $(acrLoginServer)/$(imageRepository):$(tag)
 
-            # Wait for rollout to be ready
             - task: Kubernetes@1
-              displayName: 'Rollout status'
+              displayName: 'Rollout status (wait until Ready)'
               inputs:
                 connectionType: 'Kubernetes Service Connection'
                 kubernetesServiceEndpoint: 'AKSServiceConnection'
@@ -170,7 +167,6 @@ stages:
                 command: 'rollout'
                 arguments: 'status deploy/aks-java-api --timeout=300s'
 
-            # Show service to get external IP
             - task: Kubernetes@1
               displayName: 'Show service (external IP)'
               inputs:
