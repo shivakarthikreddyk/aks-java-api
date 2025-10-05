@@ -2,14 +2,13 @@ apiVersion: v1
 kind: Service
 metadata:
   name: aks-java-api
-  # namespace: demo   # optional; omit to let pipeline set it
   labels:
     app: aks-java-api
 spec:
-  type: LoadBalancer     # or ClusterIP if you don’t need a public IP
+  type: LoadBalancer
   selector:
-    app: aks-java-api    # must match pod labels
+    app: aks-java-api
   ports:
     - name: http
-      port: 80           # service port
-      targetPort: 8080   # container port
+      port: 80
+      targetPort: 8080

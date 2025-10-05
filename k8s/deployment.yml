@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: aks-java-api
-  # namespace: demo     # <- optional; better to omit and let the pipeline set namespace
   labels:
     app: aks-java-api
 spec:
@@ -17,26 +16,12 @@ spec:
     spec:
       containers:
         - name: aks-java-api
-          # The pipeline injects the image reference, so leave this as a placeholder or omit.
-          # image: hwacrdev001.azurecr.io/aks-java-api:latest
+          image: hwacrdev001.azurecr.io/aks-java-api:latest
           ports:
-            - name: http
-              containerPort: 8080
+            - containerPort: 8080
           env:
             - name: APP_MESSAGE
               valueFrom:
                 secretKeyRef:
                   name: app-secrets
                   key: APP_MESSAGE
-          readinessProbe:
-            httpGet:
-              path: /hello
-              port: 8080
-            initialDelaySeconds: 5
-            periodSeconds: 5
-          livenessProbe:
-            httpGet:
-              path: /hello
-              port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 10
