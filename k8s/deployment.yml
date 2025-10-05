@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: aks-java-api
+  namespace: demo
   labels:
     app: aks-java-api
 spec:
@@ -16,12 +17,22 @@ spec:
     spec:
       containers:
         - name: aks-java-api
+          # The pipeline will override this image/tag at deploy time
           image: hwacrdev001.azurecr.io/aks-java-api:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
-          env:
-            - name: APP_MESSAGE
-              valueFrom:
-                secretKeyRef:
-                  name: app-secrets
-                  key: APP_MESSAGE
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      # If your AKS is already attached to the ACR (shown in your portal),
+      # you do NOT need imagePullSecrets. If it isn’t, tell me and I’ll add one.
